@@ -37,12 +37,19 @@ class LiteralStr:
     def __str__(self):
         return f"{type(self).__name__}({self.title})"
 
+    def __repr__(self):
+        return str(self)
+
+    @classmethod
+    def is_valid(cls, str):
+        return str in get_args(cls.literal)
+
     @classmethod
     def from_input(cls):
-        s = ""
-        while s not in get_args(cls.literal):
-            s = input(f"Input {cls.__name__}: ").title()
-        return cls(s)
+        rt = ""
+        while rt not in get_args(cls.literal):
+            rt = input(f"Input {cls.__name__}: ").title()
+        return cls(rt)
 
 
 class WhoCanBlock(LiteralStr):
@@ -55,7 +62,7 @@ class WhoCanBlock(LiteralStr):
                               players_number: int,
                               action,  # Action
                               ) -> List[int]:
-        if self == NO_ONE:
+        if self == NO_ONE or (self == VICTIM and not action.victim_index):
             return []
         elif self == VICTIM and action.victim_index:
             return [action.victim_index]
@@ -83,12 +90,12 @@ FICTION_ANY_CARD = Card("Any")
 
 
 class ActionBase(LiteralStr):
-    literal = Literal["Income", "Foreign_aid", "Coup", "Tax", "Assassinate", "Steal", "Exchange"]
+    literal = Literal["Income", "Foreign_Aid", "Coup", "Tax", "Assassinate", "Steal", "Exchange"]
 
     def __init__(self, title: literal):
         super(ActionBase, self).__init__(title)
 INCOME = ActionBase("Income")
-FOREIGN_AID = ActionBase("Foreign_aid")
+FOREIGN_AID = ActionBase("Foreign_Aid")
 COUP = ActionBase("Coup")
 TAX = ActionBase("Tax")
 ASSASSINATE = ActionBase("Assassinate")
@@ -105,28 +112,17 @@ class Action:
         self.sender_index = sender_index
         self.victim_index = victim_index
 
-    def _check(self) -> None:
-        if self not in CAN_BE_PLAYED_BY:
-            raise ValueError(f"Action {self.base()} not in {sorted(CAN_BE_PLAYED_BY.keys())}")
-
     def base(self) -> ActionBase:
         return ActionBase(self.title)
 
-    """
-    def can_be_played_with_cards(self, cards: Tuple[Card]) -> bool:
-        self._check()
-
-        can_be_played_by = CAN_BE_PLAYED_BY[self.root()]
-        if can_be_played_by == FICTION_ANY_CARD:
-            return True
-        return can_be_played_by in cards
-
-    def can_be_blocked_with_cards(self, cards: Tuple[Card]) -> bool:
-        self._check()
-
-        can_be_played_by = CAN_BE_BLOCKED_BY[self.root()]
-        return any(blocker in cards for blocker in can_be_played_by)
-    """
+    @staticmethod
+    def from_input(sender_index: int):
+        base = ActionBase.from_input()
+        if HAS_VICTIM[base]:
+            victim_index = int(input("Input victim_index (from alive players): "))
+        else:
+            victim_index = None
+        return __class__(base.title, sender_index, victim_index)
 
     def __str__(self):
         s = f"{self.title}(sender={self.sender_index}%s)"
@@ -157,12 +153,22 @@ CAN_BE_BLOCKED_BY: Dict[ActionBase, List[Card]] = {
 
 WHO_CAN_BLOCK: Dict[ActionBase, WhoCanBlock] = {
     INCOME: NO_ONE,
-    FOREIGN_AID: NO_ONE,
+    FOREIGN_AID: EVERY_ONE,
     COUP: NO_ONE,
-    TAX: EVERY_ONE,
+    TAX: NO_ONE,
     ASSASSINATE: VICTIM,
     STEAL: VICTIM,
     EXCHANGE: NO_ONE
+}
+
+HAS_VICTIM: Dict[ActionBase, bool] = {
+    INCOME: False,
+    FOREIGN_AID: False,
+    COUP: True,
+    TAX: False,
+    ASSASSINATE: True,
+    STEAL: True,
+    EXCHANGE: False
 }
 
 
@@ -195,6 +201,18 @@ class MovesHistory:
         pass
 
 
+class PublicPartOfPlayerState:
+    def __init__(self, cards_number: int, coins_number: int):
+        self.cards_number = cards_number
+        self.coins_number = coins_number
+
+    def __str__(self):
+        return f"PPoPS(cards={self.cards_number}, coins={self.coins_number})"
+
+    def __repr__(self):
+        return str(self)
+
+
 class PlayerState:
     def __init__(self, cards: Tuple[Card], coins: int):
         self.cards: List[Card] = list(cards)
@@ -214,22 +232,28 @@ class PlayerState:
     def to_list(self) -> List[float]:
         pass
 
+    def public_part(self) -> PublicPartOfPlayerState:
+        return PublicPartOfPlayerState(len(self.cards), self.coins)
+
+    def __str__(self):
+        return f"PlayerState({self.cards}, coins={self.coins})"
+
 
 class PlayerObservation:
     def __init__(self,
                  state: PlayerState,
                  discharge: List[Card],
-                 players_cards_number: List[int],
+                 players_visible_states: List[PublicPartOfPlayerState],
                  history: MovesHistory):
         self.state = state
         self.discharge = discharge
-        self.players_cards_number = players_cards_number
+        self.players_visible_states = players_visible_states
         self.history = history
 
         self.info_dict: Dict[str, Any] = {
             "state": state,
             "discharge": discharge,
-            "players_cards_number": players_cards_number,
+            "players_visible_states": players_visible_states,
             "history": history
         }
 
@@ -237,7 +261,13 @@ class PlayerObservation:
         pass
 
     def __str__(self):
-        return f"PlayerObservation({self.info_dict})"
+        rt = "PlayerObservation(\n"
+        rt += "\n".join([f"    {key}: {value}" for key, value in self.info_dict.items()])
+        rt += "\n)"
+        return rt
+
+    def __repr__(self):
+        return str(self)
 
 
 class Player:
@@ -263,28 +293,26 @@ class Player:
 
 
 class InputPlayer(Player):
+    """All moves are input by user."""
     def _print_situation(self, arg: Any, question: str) -> None:
-        print(f"I'm {self}. observation is\n {arg}. {question}")
+        print(f"I'm {self}. {question}. Observation is\n{arg}")
 
     def action(self, observation: PlayerObservation) -> Action:
         self._print_situation(observation, "What is my action?")
-        action_name: str = ""
-        victim_index: str = ""
-        while ActionBase(action_name) not in CAN_BE_PLAYED_BY.keys() or not victim_index.isdigit():
-            action_name, victim_index = input("Input 'action_name victim_index'").split()
-        victim = int(victim_index)
-        return Action(action_name, self.index, victim if victim >= 0 else None)
+        return Action.from_input(self.index)
 
     def card_to_block(self, action: Action, observation: PlayerObservation) -> Union[bool, Card]:
-        self._print_situation((action, observation), "")
-        return input_yes_or_not("Do I want block?") == "yes"
+        self._print_situation(f"({str(action)}, {str(observation)})", "")
+        if input_yes_or_not("Do I want block?") == "not":
+            return False
+        return Card.from_input()  # "Input Card to blocj"
 
     def wants_to_check(self, player_index: int, card: Card, observation: PlayerObservation) -> bool:
-        self._print_situation((player_index, card, observation), "")
+        self._print_situation((player_index, card, observation), "Do I want check?")
         return input_yes_or_not("Do I want check?") == "yes"
 
     def what_card_to_lose(self, observation: PlayerObservation) -> Card:
-        self._print_situation(observation)
+        self._print_situation(observation, "What card to lose")
         return Card.from_input()
 
 
@@ -299,8 +327,11 @@ class CardDeck:
         random.shuffle(self.cards)
         return self.pop(), self.pop()
 
-    def reshuffle(self, card: Card) -> Card:
+    def add_card(self, card: Card):
         self.cards.append(card)
+
+    def reshuffle(self, card: Card) -> Card:
+        self.add_card(card)
         return self.pop()
 
     def __str__(self):
@@ -320,7 +351,6 @@ class CoupGame:
         self.moves_history = MovesHistory()
 
         self.player_index_iter = itertools.chain(*[range(self.n) for _ in range(moves_number)])
-        self.player_cards_number: List[int] = list(itertools.repeat(2, self.n))
         self.place_in_game: List[int] = list(itertools.repeat(1, self.n))
 
         fake_state = PlayerState((FICTION_ANY_CARD,), 0)
@@ -332,19 +362,24 @@ class CoupGame:
             self.player_state[player_index] = PlayerState(self.deck.pop2(), 2)
 
     def play(self) -> List[int]:
-        def everyone_checks_if_he_wants(self, player_index, card) -> bool:
-            """Returns action_succeed:
+        def everyone_checks_if_he_wants(self, player_index: int, card: Card) -> bool:
+            """
+            Returns action_succeed == nobody stopped:
                     True if nobody checks or given player has given card
             """
+            if card == FICTION_ANY_CARD:
+                return True
             player_state: PlayerState = self.player_state[player_index]
             action_succeed = True
             for other in other_players(self.n, player_index):
+                if not self.is_alive(other):
+                    continue
                 his_observation = self.player_observation(other)
-                if players[other].wants_to_check(other, card, his_observation):
-                    if card in player_state.cards + [FICTION_ANY_CARD]:
+                if players[other].wants_to_check(player_index, card, his_observation):
+                    if card in player_state.cards:
                         self.kill_player(other)
                         player_state.pop_card(card)
-                        player_state.add_cards(self.deck.pop())
+                        player_state.add_cards([self.deck.pop()])
                         action_succeed = True  # unnecessary but why not
                     else:
                         self.kill_player(player_index)
@@ -354,14 +389,17 @@ class CoupGame:
 
         players, n = self.players, self.n
         for player_index in self.player_index_iter:
-            if not self.player_cards_number[player_index]:
+            if not self.is_alive(player_index):
                 continue
-            if sum(self.player_cards_number) <= 1:
+            if sum(int(self.is_alive(player)) for player in range(self.n)) <= 1:
+                # Game has ended.
                 break
             player = players[player_index]
             player_observation = self.player_observation(player_index)
 
             action = player.action(player_observation)
+            self.preexecute_action(action)
+
             is_action_succeed = everyone_checks_if_he_wants(
                 self, player_index, CAN_BE_PLAYED_BY[action.base()]
             )
@@ -370,6 +408,8 @@ class CoupGame:
 
             is_block_succeed = False
             for blockator in WHO_CAN_BLOCK[action.base()].players_who_can_block(n, action):
+                if not self.is_alive(blockator):
+                    continue
                 his_observation = self.player_observation(blockator)
                 block_card = players[blockator].card_to_block(action, his_observation)
                 if not block_card:
@@ -380,24 +420,52 @@ class CoupGame:
                 if is_block_succeed:
                     break
 
+            # todo Add moves
+
             if not is_block_succeed:
                 self.execute_action(action)
 
         return self.place_in_game
 
-    def kill_player(self, index: int) -> None:
-        unnessessary_card = self.players[index].what_card_to_lose(self.player_observation(index))
-        self.player_state[index].pop_card(unnessessary_card)
+    def kill_player(self,
+                    index: int,
+                    put_card_to: Literal["discharge", "deck"] = "discharge") -> None:
+        if not self.player_state[index]:
+            return
+        lost_card = self.players[index].what_card_to_lose(self.player_observation(index))
+        self.player_state[index].pop_card(lost_card)
+
         if not self.player_state[index].cards:
-            self.place_in_game[index] = self.n - sum(map(int, self.player_cards_number))
-            self.player_cards_number[index] = False
+            self.place_in_game[index] = self.n - sum(self.is_alive(pl) for pl in range(self.n))
+
+        if put_card_to == "discharge":
+            self.discharge.append(lost_card)
+        elif put_card_to == "deck":
+            self.deck.add_card(lost_card)
+        else:
+            Warning(f"put_card_to argument is {put_card_to}")
 
     def player_observation(self, player_index) -> PlayerObservation:
-        pass
+        return PlayerObservation(
+            self.player_state[player_index],
+            self.discharge,
+            [player_state.public_part() for player_state in self.player_state],
+            self.moves_history,
+        )
 
-    def execute_action(self, action: Action):
+    def is_alive(self, player_index: int) -> bool:
+        return bool(self.player_state[player_index].cards)
+
+    def preexecute_action(self, action: Action) -> None:
+        if action == ASSASSINATE:
+            self.player_state[action.sender_index].add_coins(-3)
+
+    def execute_action(self, action: Action) -> None:
         root, sender, victim = action.base(), action.sender_index, action.victim_index
         add_coins = self.player_state[sender].add_coins
+        if victim and not self.is_alive(victim):
+            Warning(f"You tried to {root} player number {victim}, but he is already dead")
+            return
         if root == INCOME:
             add_coins(1)
         elif root == FOREIGN_AID:
@@ -411,12 +479,13 @@ class CoupGame:
             add_coins(-3)
             self.kill_player(victim)
         elif root == STEAL:
-            add_coins(2)
-            self.player_state[victim].add_coins(-2)
+            stealed_couns = min(self.player_state[victim].coins, 2)
+            add_coins(stealed_couns)
+            self.player_state[victim].add_coins(-stealed_couns)
         elif root == EXCHANGE:
             self.player_state[sender].add_cards(self.deck.pop2())
-            self.kill_player(sender)
-            self.kill_player(sender)
+            self.kill_player(sender, put_card_to="deck")
+            self.kill_player(sender, put_card_to="deck")
         else:
             raise ValueError(f"Action {action} with root {root} is not processed")
 
@@ -435,3 +504,15 @@ def input_yes_or_not(inp: str) -> Literal["yes", "not"]:
     return "not"
 
 
+def my_str(l: Any, indent: int = 4, already_indent: int = 0) -> str:
+    if type(l) in [list, tuple]:
+        if not l:
+            print(l)
+        rt = f"[\n"
+        already_indent += indent
+        for elem in l[0:]:
+            rt += " " * already_indent + my_str(elem, indent, already_indent) + ",\n"
+        rt += " " * (already_indent - indent) + "]"
+    else :
+        rt = str(l)
+    return rt
